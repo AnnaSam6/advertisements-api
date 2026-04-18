@@ -1,5 +1,6 @@
 from flask import Flask, request, jsonify
 from models import db, Advertisement
+from datetime import datetime
 
 app = Flask(__name__)
 app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///advertisements.db'
@@ -9,6 +10,39 @@ app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 db.init_app(app)
 
 
+def validate_advertisement_data(data, is_update=False):
+    """
+    Валидация данных объявления
+    Возвращает (is_valid, error_message)
+    """
+    if not data:
+        return False, "No JSON data provided"
+    
+    if not is_update:
+        # Для создания проверяем все обязательные поля
+        required_fields = ['title', 'description', 'owner']
+        missing_fields = [field for field in required_fields if field not in data or not data[field]]
+        
+        if missing_fields:
+            return False, f"Missing required fields: {', '.join(missing_fields)}"
+        
+        # Проверка типов
+        if not isinstance(data.get('title'), str):
+            return False, "Field 'title' must be a string"
+        if not isinstance(data.get('description'), str):
+            return False, "Field 'description' must be a string"
+        if not isinstance(data.get('owner'), str):
+            return False, "Field 'owner' must be a string"
+        
+        # Проверка длины
+        if len(data['title']) > 200:
+            return False, "Field 'title' must be less than 200 characters"
+        if len(data['owner']) > 100:
+            return False, "Field 'owner' must be less than 100 characters"
+    
+    return True, None
+
+
 @app.route('/advertisements', methods=['POST'])
 def create_advertisement():
     """
@@ -16,19 +50,18 @@ def create_advertisement():
     Ожидает JSON: {"title": "...", "description": "...", "owner": "..."}
     """
     try:
-        data = request.get_json()
-
-        # Валидация обязательных полей
-        if not data or not all(key in data for key in ['title', 'description', 'owner']):
-            return jsonify({
-                'error': 'Missing required fields. Required: title, description, owner'
-            }), 400
+        data = request.get_json(silent=True)
+        
+        # Валидация данных
+        is_valid, error_message = validate_advertisement_data(data, is_update=False)
+        if not is_valid:
+            return jsonify({'error': error_message}), 400
 
         # Создание объявления
         advertisement = Advertisement(
-            title=data['title'],
-            description=data['description'],
-            owner=data['owner']
+            title=data['title'].strip(),
+            description=data['description'].strip(),
+            owner=data['owner'].strip()
         )
 
         db.session.add(advertisement)
@@ -38,7 +71,7 @@ def create_advertisement():
 
     except Exception as e:
         db.session.rollback()
-        return jsonify({'error': str(e)}), 500
+        return jsonify({'error': f'Internal server error: {str(e)}'}), 500
 
 
 @app.route('/advertisements/<int:ad_id>', methods=['GET'])
@@ -50,12 +83,12 @@ def get_advertisement(ad_id):
         advertisement = Advertisement.query.get(ad_id)
 
         if not advertisement:
-            return jsonify({'error': 'Advertisement not found'}), 404
+            return jsonify({'error': f'Advertisement with id {ad_id} not found'}), 404
 
         return jsonify(advertisement.to_dict()), 200
 
     except Exception as e:
-        return jsonify({'error': str(e)}), 500
+        return jsonify({'error': f'Internal server error: {str(e)}'}), 500
 
 
 @app.route('/advertisements/<int:ad_id>', methods=['PUT'])
@@ -68,43 +101,63 @@ def update_advertisement(ad_id):
         advertisement = Advertisement.query.get(ad_id)
 
         if not advertisement:
-            return jsonify({'error': 'Advertisement not found'}), 404
+            return jsonify({'error': f'Advertisement with id {ad_id} not found'}), 404
 
-        data = request.get_json()
+        data = request.get_json(silent=True)
 
         if not data:
-            return jsonify({'error': 'No data provided'}), 400
+            return jsonify({'error': 'No JSON data provided for update'}), 400
 
-        # Обновление полей
-        advertisement.update_from_dict(data)
+        # Обновление только переданных полей с валидацией
+        if 'title' in data:
+            if not isinstance(data['title'], str) or not data['title'].strip():
+                return jsonify({'error': "Field 'title' must be a non-empty string"}), 400
+            if len(data['title']) > 200:
+                return jsonify({'error': "Field 'title' must be less than 200 characters"}), 400
+            advertisement.title = data['title'].strip()
+            
+        if 'description' in data:
+            if not isinstance(data['description'], str) or not data['description'].strip():
+                return jsonify({'error': "Field 'description' must be a non-empty string"}), 400
+            advertisement.description = data['description'].strip()
+            
+        if 'owner' in data:
+            if not isinstance(data['owner'], str) or not data['owner'].strip():
+                return jsonify({'error': "Field 'owner' must be a non-empty string"}), 400
+            if len(data['owner']) > 100:
+                return jsonify({'error': "Field 'owner' must be less than 100 characters"}), 400
+            advertisement.owner = data['owner'].strip()
+
         db.session.commit()
 
         return jsonify(advertisement.to_dict()), 200
 
     except Exception as e:
         db.session.rollback()
-        return jsonify({'error': str(e)}), 500
+        return jsonify({'error': f'Internal server error: {str(e)}'}), 500
 
 
 @app.route('/advertisements/<int:ad_id>', methods=['DELETE'])
 def delete_advertisement(ad_id):
     """
     Удаление объявления
+    Возвращает статус 204 No Content при успешном удалении
     """
     try:
         advertisement = Advertisement.query.get(ad_id)
 
         if not advertisement:
-            return jsonify({'error': 'Advertisement not found'}), 404
+            return jsonify({'error': f'Advertisement with id {ad_id} not found'}), 404
 
         db.session.delete(advertisement)
         db.session.commit()
 
-        return jsonify({'message': 'Advertisement deleted successfully'}), 200
+        # Возвращаем 204 No Content без тела ответа
+        return '', 204
 
     except Exception as e:
         db.session.rollback()
-        return jsonify({'error': str(e)}), 500
+        return jsonify({'error': f'Internal server error: {str(e)}'}), 500
 
 
 # Дополнительный эндпоинт для получения всех объявлений
@@ -115,19 +168,22 @@ def get_all_advertisements():
     """
     try:
         advertisements = Advertisement.query.order_by(
-            Advertisement.created_date.desc()
+            Advertisement.created_at.desc()
         ).all()
 
         return jsonify([ad.to_dict() for ad in advertisements]), 200
 
     except Exception as e:
-        return jsonify({'error': str(e)}), 500
+        return jsonify({'error': f'Internal server error: {str(e)}'}), 500
 
 
-# Создание таблиц при запуске
-with app.app_context():
-    db.create_all()
+# Безопасное создание таблиц при запуске
+def init_db():
+    """Инициализация базы данных безопасным способом"""
+    with app.app_context():
+        db.create_all()
 
 
 if __name__ == '__main__':
+    init_db()
     app.run(debug=True, port=5000)
